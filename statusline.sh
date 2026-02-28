@@ -92,12 +92,44 @@ GIT_BRANCH=""
 # Working directory name
 DIR_NAME="${CWD##*/}"
 
+# === Window counter (context compaction tracking) ===
+# Tracks how many times the context window has been compacted during a session.
+# Detects compaction when input tokens drop below 40% of peak.
+# Resets on new session (>5min gap + low tokens).
+# Set STATUSLINE_WINDOW_COUNTER=0 to disable.
+FLAG_DIR="${STATUSLINE_FLAG_DIR:-$HOME/.claude/.context-flags}"
+WINDOW_COUNT=1
+WIN_FMT=""
+
+if [[ "${STATUSLINE_WINDOW_COUNTER:-1}" != "0" ]]; then
+    [[ -d "$FLAG_DIR" ]] || mkdir -p "$FLAG_DIR"
+    WINDOW_STATE="$FLAG_DIR/window-state"
+    CUR_T=${INPUT_TOKENS%%.*}; : "${CUR_T:=0}"
+    NOW_EPOCH=$(date +%s)
+
+    if [[ -f "$WINDOW_STATE" ]]; then
+        read -r W_COUNT W_PEAK W_EPOCH < "$WINDOW_STATE"
+        : "${W_COUNT:=1}" "${W_PEAK:=0}" "${W_EPOCH:=0}"
+        if (( NOW_EPOCH - W_EPOCH > 300 && CUR_T < 5000 )); then
+            WINDOW_COUNT=1; W_PEAK=$CUR_T
+        elif (( W_PEAK > 30000 && CUR_T < W_PEAK * 4 / 10 )); then
+            WINDOW_COUNT=$((W_COUNT + 1)); W_PEAK=$CUR_T
+        else
+            WINDOW_COUNT=$W_COUNT
+            (( CUR_T > W_PEAK )) && W_PEAK=$CUR_T
+        fi
+    else
+        W_PEAK=$CUR_T
+    fi
+    printf '%d %d %d' "$WINDOW_COUNT" "$W_PEAK" "$NOW_EPOCH" > "$WINDOW_STATE"
+    WIN_FMT="\033[2m#${WINDOW_COUNT}\033[0m"
+fi
+
 # === Optional: Context threshold flags ===
 # Writes flag files when context usage crosses 70/85/95%.
 # Useful for hooks that trigger auto-save or notifications.
 # Set STATUSLINE_FLAGS=0 to disable this feature.
 if [[ "${STATUSLINE_FLAGS:-1}" != "0" ]] && (( PCT >= 70 )); then
-    FLAG_DIR="${STATUSLINE_FLAG_DIR:-$HOME/.claude/.context-flags}"
     [[ -d "$FLAG_DIR" ]] || mkdir -p "$FLAG_DIR"
     NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -121,10 +153,16 @@ fi
 # === ANSI shortcuts ===
 R='\033[0m' D='\033[2m' SEP=" ${D}|${R} "
 
-# === Line 1: Model | Context bar % of size | Tokens in/out | Cache ===
-printf '\033[1m\033[36m%s\033[0m%b[%b%s%b] %d%% of %s%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
-    "$MODEL" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$SEP" \
-    "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
+# === Line 1: Model | Context bar % of size #window | Tokens in/out | Cache ===
+if [[ -n "$WIN_FMT" ]]; then
+    printf '\033[1m\033[36m%s\033[0m%b[%b%s%b] %d%% of %s %b%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
+        "$MODEL" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$WIN_FMT" "$SEP" \
+        "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
+else
+    printf '\033[1m\033[36m%s\033[0m%b[%b%s%b] %d%% of %s%b\033[32m↓%s\033[0m \033[35m↑%s\033[0m%b%bcache%b r:%s w:%s\n' \
+        "$MODEL" "$SEP" "$C_CTX" "$BAR" "$R" "$PCT" "$CTX_SIZE_FMT" "$SEP" \
+        "$IN_FMT" "$OUT_FMT" "$SEP" "$D" "$R" "$CACHE_R_FMT" "$CACHE_C_FMT"
+fi
 
 # === Line 2: Cost | Duration | Lines | Git | Dir | extras ===
 L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
