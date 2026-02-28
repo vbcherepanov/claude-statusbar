@@ -1,0 +1,30 @@
+{
+  "model": {
+    "display_name": "Claude Opus 4.6"
+  },
+  "cwd": "/Users/dev/my-project",
+  "vim": {
+    "mode": "NORMAL"
+  },
+  "agent": {
+    "name": ""
+  },
+  "exceeds_200k_tokens": false,
+  "context_window": {
+    "used_percentage": 42.5,
+    "total_input_tokens": 156800,
+    "total_output_tokens": 23400,
+    "context_window_size": 200000,
+    "current_usage": {
+      "cache_creation_input_tokens": 45000,
+      "cache_read_input_tokens": 89000
+    }
+  },
+  "cost": {
+    "total_cost_usd": 1.47,
+    "total_duration_ms": 342000,
+    "total_api_duration_ms": 198000,
+    "total_lines_added": 245,
+    "total_lines_removed": 31
+  }
+}
