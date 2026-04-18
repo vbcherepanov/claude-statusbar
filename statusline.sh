@@ -170,11 +170,23 @@ if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
         fi
     }
 
-    # Background refresh every 2 minutes
+    # Force sync refresh if cache is empty
+    if [[ -f "$USAGE_CACHE" ]] && [[ $(wc -c < "$USAGE_CACHE") -le 2 ]]; then
+        _tk_sync=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+        if [[ -n "$_tk_sync" ]]; then
+            _d_sync=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
+                -H "Authorization: Bearer $_tk_sync" \
+                -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
+            [[ -n "$_d_sync" ]] && printf '%s' "$_d_sync" | jq -e '.five_hour' &>/dev/null && {
+                umask 077; printf '%s' "$_d_sync" > "$USAGE_CACHE"
+            }
+        fi
+    fi
+
+    # Refresh every 2 minutes (sync on Linux, background on macOS/Windows)
     if (( NOW_EPOCH - _cache_mtime > 120 )); then
         [[ -f "$USAGE_CACHE" ]] || printf '{}' > "$USAGE_CACHE"
-        touch "$USAGE_CACHE"
-        (
+        _do_refresh() {
             # Extract OAuth token from platform-specific secure storage
             if [[ "$OSTYPE" == "darwin"* ]]; then
                 _cred=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
@@ -183,6 +195,10 @@ if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
                     '[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((Get-StoredCredential -Target "Claude Code-credentials" -AsCredentialObject).Password))' 2>/dev/null)
             else
                 _cred=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+                # Fallback: read directly from credentials file if secret-tool fails
+                if [[ -z "$_cred" && -f "$HOME/.claude/.credentials.json" ]]; then
+                    _cred=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null)
+                fi
             fi
             [[ -n "$_cred" ]] || exit 1
             _tk=$(printf '%s' "$_cred" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
@@ -193,7 +209,15 @@ if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
             [[ -n "$_d" ]] && printf '%s' "$_d" | jq -e '.five_hour' &>/dev/null && {
                 umask 077; printf '%s' "$_d" > "$USAGE_CACHE"
             }
-        ) &>/dev/null &
+        }
+        # Linux: run synchronously (Claude Code kills background processes on exit)
+        # macOS/Windows: run in background to avoid latency
+        if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win"* ]]; then
+            ( _do_refresh ) &>/dev/null &
+        else
+            _do_refresh 2>/dev/null
+            touch "$USAGE_CACHE"
+        fi
     fi
 
     # Read cached data and compute remaining % and reset times
