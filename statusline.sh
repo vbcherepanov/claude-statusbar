@@ -170,8 +170,8 @@ if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
         fi
     }
 
-    # Force sync refresh if cache is empty
-    if [[ -f "$USAGE_CACHE" ]] && [[ $(wc -c < "$USAGE_CACHE") -le 2 ]]; then
+    # Force sync refresh if cache is missing or empty
+    if [[ ! -f "$USAGE_CACHE" ]] || [[ $(wc -c < "$USAGE_CACHE" 2>/dev/null || echo 0) -le 2 ]]; then
         _tk_sync=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
         if [[ -n "$_tk_sync" ]]; then
             _d_sync=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
