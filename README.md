@@ -1,6 +1,10 @@
 # claude-statusline
 
-A rich, three-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI.
+> A rich, three-line status bar for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI — works on **macOS, Linux, WSL2, and Windows**.
+
+[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal)](https://paypal.me/VitaliiCherepanov)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL2%20%7C%20Windows-lightgrey)](#platform-support)
 
 Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, subscription usage limits, and more.
 
@@ -10,210 +14,216 @@ $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
 ```
 
-## Features
+---
 
-- **Model name** — which Claude model is active
-- **Context usage bar** — 20-char visual progress bar with color thresholds (green → yellow → red)
-- **Token counts** — input/output tokens with human-readable formatting (K/M)
-- **Cache stats** — cache read/write token counts
-- **Cost** — total session cost in USD
-- **Duration** — total time and API time separately
-- **Lines changed** — added/removed lines count
-- **Git branch** — current branch (when in a repo)
-- **Working directory** — project folder name
-- **Vim mode** — shows `[N]` or `[I]` indicator when vim mode is active
-- **Agent name** — shows active sub-agent name
-- **Usage limits** — 5-hour and 7-day subscription quota with progress bars and reset countdown
-- **200K warning** — warns when context exceeds 200K tokens
-- **Context threshold alerts** — optional flag files at 70/85/95% for hook integration
-- **macOS notifications** — optional native alerts at 85% and 95% thresholds
+## Why this exists
+
+Claude Code's built-in status line shows the model name and a terse percentage. That's fine until you:
+
+- **Burn through your 5-hour / 7-day subscription quota** without noticing and get cut off mid-task.
+- **Hit context auto-compaction** and lose state because you didn't see 85% approaching.
+- **Rack up API cost** on long sessions with no live $ counter.
+- **Lose track of cache hits vs writes** when debugging performance.
+- **Switch between projects** and forget which branch you're on.
+
+`claude-statusline` solves all of it in a single shell script — zero runtime dependencies beyond `jq` and `curl`, ~20 ms per update, no daemon, no background process.
+
+## What it shows
+
+### Line 1 — model, context, tokens, cache
+
+```
+Model | [████░░░░░░░░] PCT% of SIZE #W | ↓input ↑output | cache r:READ w:WRITE
+```
+
+- **Model name** — which Claude model is active (color: cyan bold)
+- **Context usage bar** — 20-char visual progress bar with color thresholds (green < 70% → yellow < 90% → red)
+- **Compaction counter `#N`** — increments every time the context window gets compacted during a session
+- **Token counts** — input (`↓`) and output (`↑`) with `K`/`M` formatting
+- **Cache stats** — cache read / write token counts
+
+### Line 2 — cost, time, diff, git, context
+
+```
+$COST | ⏱ DURATION (api API_DUR) | +ADDED/-REMOVED | ⎇ BRANCH | 📂 DIR | [N]
+```
+
+- **Cost** in USD (yellow)
+- **Duration** total and API-only separately
+- **Lines added/removed** during the session
+- **Git branch** (when in a repo)
+- **Working directory name**
+- **Vim mode** `[N]` / `[I]` indicator (when vim mode is active)
+- **Sub-agent name** (when an agent is running)
+- **`⚠ >200K`** warning when tokens exceed 200K
+
+### Line 3 — subscription quota
+
+```
+5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
+```
+
+Real subscription limits pulled from `https://api.anthropic.com/api/oauth/usage` (cached 2 min). Shows **remaining** quota with a fuel-gauge colour (green > 50% → yellow > 20% → red) and countdown to reset. Only appears when you're logged in via `claude.ai` OAuth (not API key).
+
+---
+
+## Platform support
+
+| Feature | macOS | Linux | WSL2 | Windows (Git Bash) |
+|---|:-:|:-:|:-:|:-:|
+| 3-line status bar | ✅ | ✅ | ✅ | ✅ |
+| Usage limits (OAuth) | ✅ Keychain | ✅ libsecret → file | ✅ file | ✅ Cred Manager → file |
+| Desktop notifications | ✅ `osascript` | ✅ `notify-send`* | ✅ `notify-send`* | ✅ `BurntToast`* |
+| Installer | `install.sh` | `install.sh` | `install.sh` | `install.ps1` |
+
+<sub>`*` — optional. If the notifier isn't installed the feature silently no-ops (status line still works).</sub>
+
+**WSL2** is treated as Linux (detected via `/proc/version`). If you want native Windows toast notifications from inside WSL2 you'll need WSLg + a Linux notifier, or invoke `BurntToast` via `powershell.exe`.
+
+---
 
 ## Requirements
 
-- **jq** — JSON processor (`brew install jq` / `apt install jq`)
-- **curl** — for usage limits API calls (pre-installed on most systems)
+- **jq** — JSON processor
+- **curl** — for usage limits API (skips gracefully if missing)
+- **bash** — 3.2+ (macOS default) or any modern 4/5
 - **Claude Code CLI** — v1.0+ with status line support
-- **bash** — works with macOS bash 3.2+ and modern bash 4/5
-- **Keychain/libsecret** — for OAuth token access (usage limits feature)
+- Optional: `notify-send` (Linux), `libsecret-tools` (Linux), `BurntToast` (Windows)
+
+Install `jq` on your platform:
+
+| OS | Command |
+|---|---|
+| macOS | `brew install jq` |
+| Debian/Ubuntu | `sudo apt-get install jq` |
+| Fedora/RHEL | `sudo dnf install jq` |
+| Arch | `sudo pacman -S jq` |
+| Alpine | `sudo apk add jq` |
+| Windows | `winget install jqlang.jq` or `choco install jq` |
+
+---
 
 ## Installation
 
-### Quick install
+### macOS / Linux / WSL2
 
 ```bash
-git clone https://github.com/anthropics/claude-statusline.git
-cd claude-statusline
+git clone https://github.com/vbcherepanov/claude-statusbar.git
+cd claude-statusbar
 bash install.sh
 ```
 
+### Windows (Git Bash + PowerShell)
+
+```powershell
+git clone https://github.com/vbcherepanov/claude-statusbar.git
+cd claude-statusbar
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+(You can also run `bash install.sh` inside Git Bash on Windows — it'll work the same way.)
+
 The installer will:
-1. Copy `statusline.sh` to `~/.claude/statusline.sh`
-2. Add the `statusLine` config to `~/.claude/settings.json`
-3. Prompt before overwriting existing files
+1. Detect your OS and check dependencies with platform-specific install hints
+2. Copy `statusline.sh` to `~/.claude/statusline.sh`
+3. Add the `statusLine` config to `~/.claude/settings.json`
+4. Prompt before overwriting existing files
 
 ### Manual install
-
-1. Copy the script:
 
 ```bash
 cp statusline.sh ~/.claude/statusline.sh
 chmod +x ~/.claude/statusline.sh
 ```
 
-2. Add to `~/.claude/settings.json`:
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "/Users/YOUR_USERNAME/.claude/statusline.sh",
+    "command": "/ABSOLUTE/PATH/TO/.claude/statusline.sh",
     "padding": 2
   }
 }
 ```
 
-3. Restart Claude Code.
+On Windows the `command` is `bash 'C:/Users/YOU/.claude/statusline.sh'`.
 
-## How It Works
+Restart Claude Code.
 
-Claude Code pipes a JSON object to stdin on every status update. The JSON contains all session metrics:
+---
 
-```json
-{
-  "model": { "display_name": "Claude Opus 4.6" },
-  "cwd": "/Users/dev/project",
-  "vim": { "mode": "NORMAL" },
-  "agent": { "name": "" },
-  "exceeds_200k_tokens": false,
-  "context_window": {
-    "used_percentage": 42.5,
-    "total_input_tokens": 156800,
-    "total_output_tokens": 23400,
-    "context_window_size": 200000,
-    "current_usage": {
-      "cache_creation_input_tokens": 45000,
-      "cache_read_input_tokens": 89000
-    }
-  },
-  "cost": {
-    "total_cost_usd": 1.47,
-    "total_duration_ms": 342000,
-    "total_api_duration_ms": 198000,
-    "total_lines_added": 245,
-    "total_lines_removed": 31
-  }
-}
-```
+## How it works
 
-The script:
-1. Parses all 16 fields in a **single `jq` call** using `@sh` for safe eval
-2. Formats values with **pure bash** (no subshells, no `bc`, no `awk`)
-3. Fetches usage limits via **background API call** with 2-minute cache
-4. Outputs three ANSI-colored lines
+Claude Code pipes session JSON to stdin every ~300 ms. The script:
 
-Total execution: **~20ms** on macOS (usage limits cached, fetched in background).
+1. **Parses all 16 fields in a single `jq` call** with `@sh` for safe eval
+2. **Formats values in pure bash** (no `bc`, no `awk`, no extra subshells)
+3. **Fetches usage limits** with a 2-minute cache (background on macOS/Windows, sync on Linux/WSL2 — because Claude Code kills backgrounded child processes on exit)
+4. **Writes threshold flags** at 70% / 85% / 95% context for hook integration
+5. **Outputs three ANSI-coloured lines**
+
+Execution time: **~20 ms** on macOS (cache warm), **~100 ms** on Linux cold start.
+
+The code is a single self-contained shell script (~320 lines). No daemon. No database. No network except the cached usage-limits endpoint.
+
+---
 
 ## Configuration
 
-### Padding
+All toggles are environment variables — set them in your shell profile or a wrapper script.
 
-The `padding` value in settings.json controls vertical space around the status line:
+| Variable | Default | Purpose |
+|---|---|---|
+| `STATUSLINE_USAGE_LIMITS` | `1` | Set `0` to disable 5h/7d line (no network calls) |
+| `STATUSLINE_WINDOW_COUNTER` | `1` | Set `0` to disable `#N` compaction counter |
+| `STATUSLINE_FLAGS` | `1` | Set `0` to disable threshold flag files |
+| `STATUSLINE_FLAG_DIR` | `~/.claude/.context-flags` | Custom directory for flag files |
+
+### CLI flags
+
+```
+statusline.sh --version   # prints: claude-statusline 1.1.0
+statusline.sh --help      # flags, env vars, and link to repo
+```
+
+### Threshold flags
+
+When context usage crosses 70 / 85 / 95 %, the script writes a JSON file to `$STATUSLINE_FLAG_DIR`. Claude Code hooks can watch this directory to trigger auto-save, notifications, or whatever else.
 
 ```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "/path/to/statusline.sh",
-    "padding": 2
-  }
-}
+{"pct":87,"in":"156.8K","out":"23.4K","cost":"$1.47","dur":"5m42s","cwd":"/path","t":"2026-04-19T16:06:42Z"}
 ```
 
-### Context threshold flags
+At 85% and 95% you also get a native desktop notification (macOS / Linux / WSL2 / Windows — see [Platform support](#platform-support)).
 
-By default, the script writes flag files to `~/.claude/.context-flags/` when context usage crosses 70%, 85%, and 95%. These can be consumed by Claude Code hooks to trigger auto-save or other actions.
+---
 
-Disable this feature:
+## Usage limits — credential resolution
+
+Fetches subscription quota using your Claude OAuth token. The script tries, in order:
+
+1. **macOS** — Keychain via `security find-generic-password`
+2. **Windows** — Credential Manager via `powershell.exe` + `CredentialManager` module
+3. **Linux/WSL2** — libsecret via `secret-tool`
+4. **Everywhere** — fallback to `~/.claude/.credentials.json` (`0600` perms)
+
+The file fallback is what makes Linux work out-of-the-box (Claude Code doesn't write to the Linux keyring). It's also why you can have a broken keyring on macOS/Windows and the script still works.
+
+Requires `claude.ai` OAuth login. API-key users will simply not see line 3.
+
+---
+
+## Testing
 
 ```bash
-# In your shell profile or wrapper
-export STATUSLINE_FLAGS=0
+cat examples/sample-input.json | bash statusline.sh
 ```
 
-Custom flag directory:
+You can pipe this to the script on any platform to see a rendered status line without launching Claude Code.
 
-```bash
-export STATUSLINE_FLAG_DIR=/tmp/claude-flags
-```
-
-### macOS notifications
-
-At 85% context usage, a "Glass" notification sounds. At 95%, a "Sosumi" alert fires. These use `osascript` and fail silently on Linux.
-
-### Usage limits
-
-Fetches subscription quota data from `https://api.anthropic.com/api/oauth/usage` using your OAuth token. Cached for 2 minutes with background refresh — does not block the status line.
-
-Requires `claude.ai` OAuth login. Token is read from:
-- **macOS**: Keychain (`security find-generic-password`)
-- **Linux**: libsecret (`secret-tool lookup`)
-- **Windows**: Credential Manager (via PowerShell)
-
-Disable this feature:
-
-```bash
-export STATUSLINE_USAGE_LIMITS=0
-```
-
-## Output Layout
-
-### Line 1
-
-```
-Model | [████░░░░░░░░] PCT% of SIZE #W | ↓input ↑output | cache r:READ w:WRITE
-```
-
-| Segment | Color | Description |
-|---------|-------|-------------|
-| Model | Cyan bold | Active model display name |
-| Progress bar | Green/Yellow/Red | 20-char block bar based on context % |
-| Window counter | Dim | Context compaction count (#1, #2, ...) |
-| Tokens | Green/Magenta | Input (↓) and output (↑) token counts |
-| Cache | Dim | Cache read/write token stats |
-
-### Line 2
-
-```
-$COST | ⏱ DURATION (api API_DUR) | +ADDED/-REMOVED | ⎇ BRANCH | 📂 DIR | [N]
-```
-
-| Segment | Color | Shown when |
-|---------|-------|------------|
-| Cost | Yellow | Always |
-| Duration | Blue | Always |
-| Lines | Green/Red | Always |
-| Git branch | Magenta | Inside a git repo |
-| Directory | Dim | Always |
-| Vim mode | Blue/Green | Vim mode is active |
-| Agent | Cyan | Sub-agent is running |
-| >200K warning | Red | Tokens exceed 200K |
-
-### Line 3
-
-```
-5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
-```
-
-| Segment | Color | Description |
-|---------|-------|-------------|
-| 5h bar | Green/Yellow/Red | 5-hour usage remaining (fuel gauge style) |
-| 5h reset | Dim | Time until 5-hour quota resets |
-| 7d bar | Green/Yellow/Red | 7-day usage remaining |
-| 7d reset | Dim | Time until 7-day quota resets |
-
-Color thresholds: green (>50% remaining), yellow (20-50%), red (<20%).
-
-Line 3 only appears when usage data is available (OAuth login, not API key).
+---
 
 ## Uninstall
 
@@ -225,23 +235,34 @@ Or manually:
 
 ```bash
 rm ~/.claude/statusline.sh
-# Remove "statusLine" key from ~/.claude/settings.json
+rm -rf ~/.claude/.context-flags ~/.claude/.usage-cache.json
+# Remove the "statusLine" key from ~/.claude/settings.json
 ```
 
-## Testing
+---
 
-Test with sample data:
+## Support the project
+
+If this saves you time (or subscription cost), consider buying me a coffee:
+
+[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal&style=for-the-badge)](https://paypal.me/VitaliiCherepanov)
+
+There's also a **Sponsor** button at the top of the GitHub repo (`.github/FUNDING.yml` → PayPal).
+
+---
+
+## Contributing
+
+Bug reports and PRs welcome, especially platform-specific fixes. The entire thing is one shell script — you can read it in 10 minutes.
+
+Before a PR:
 
 ```bash
-cat examples/sample-input.json | bash statusline.sh
+bash -n statusline.sh install.sh uninstall.sh        # syntax
+shellcheck statusline.sh install.sh uninstall.sh     # lint (optional)
+cat examples/sample-input.json | bash statusline.sh  # smoke test
 ```
-
-## Support
-
-If you find this useful, you can buy me a coffee:
-
-[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue?logo=paypal)](https://paypal.me/VitaliiCherepanov)
 
 ## License
 
-MIT
+[MIT](LICENSE)

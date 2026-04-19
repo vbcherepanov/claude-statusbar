@@ -1,12 +1,149 @@
 #!/bin/bash
 # claude-statusline — Rich status line for Claude Code CLI
-# https://github.com/vitalii/claude-statusline
+# https://github.com/vbcherepanov/claude-statusbar
 #
 # Displays real-time session metrics: model, context usage, tokens,
 # cost, duration, git branch, cache stats, usage limits, and more.
 #
 # Claude Code pipes JSON to stdin with session data.
 # This script parses it and outputs a formatted three-line status bar.
+#
+# Supported platforms: macOS, Linux, WSL2, Windows (Git Bash / MSYS2 / Cygwin).
+
+STATUSLINE_VERSION="1.1.0"
+
+# === Platform detection and cross-platform helpers ===
+
+# Detect OS family: "mac" | "linux" | "wsl" | "windows" | "unknown"
+_detect_os() {
+    case "$OSTYPE" in
+        darwin*)             printf 'mac' ;;
+        msys*|cygwin*|win*)  printf 'windows' ;;
+        linux*)
+            if [[ -r /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+                printf 'wsl'
+            else
+                printf 'linux'
+            fi
+            ;;
+        *)                   printf 'unknown' ;;
+    esac
+}
+
+# Cross-platform file mtime in epoch seconds (works on BSD stat / GNU stat / busybox)
+_stat_mtime() {
+    local f=$1
+    [[ -f "$f" ]] || { printf '0'; return; }
+    stat -f %m "$f" 2>/dev/null \
+        || stat -c %Y "$f" 2>/dev/null \
+        || date -r "$f" +%s 2>/dev/null \
+        || printf '0'
+}
+
+# Read OAuth credential JSON.
+# Tries platform-native secure storage first, falls back to ~/.claude/.credentials.json
+# (Claude Code stores token in the file on Linux; on macOS/Windows it's a belt-and-braces fallback).
+_get_cred() {
+    local cred="" os
+    os=$(_detect_os)
+    case "$os" in
+        mac)
+            cred=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+            ;;
+        windows)
+            cred=$(powershell.exe -NoProfile -Command \
+                '[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((Get-StoredCredential -Target "Claude Code-credentials" -AsCredentialObject).Password))' 2>/dev/null | tr -d '\r')
+            ;;
+        linux|wsl)
+            cred=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+            ;;
+    esac
+    # Universal fallback: plain credentials file (perms 600, Claude Code writes it on Linux by default)
+    if [[ -z "$cred" && -f "$HOME/.claude/.credentials.json" ]]; then
+        cred=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null)
+    fi
+    printf '%s' "$cred"
+}
+
+# Fetch usage JSON and write to cache on success. Silent on failure.
+_fetch_usage() {
+    local cred tk data
+    cred=$(_get_cred)
+    [[ -n "$cred" ]] || return 1
+    tk=$(printf '%s' "$cred" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    [[ -n "$tk" ]] || return 1
+    data=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
+        -H "Authorization: Bearer $tk" \
+        -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
+    [[ -n "$data" ]] || return 1
+    printf '%s' "$data" | jq -e '.five_hour' &>/dev/null || return 1
+    umask 077
+    printf '%s' "$data" > "$USAGE_CACHE"
+    touch "$USAGE_CACHE"
+}
+
+# Platform-aware notification. Silent if no notifier available.
+# Args: title, message, [level: critical|warning|info]
+_notify() {
+    local title=$1 msg=$2 level=${3:-info}
+    case "$(_detect_os)" in
+        mac)
+            local sound=''
+            case "$level" in
+                critical) sound='Sosumi' ;;
+                warning)  sound='Glass' ;;
+            esac
+            if [[ -n "$sound" ]]; then
+                osascript -e "display notification \"$msg\" with title \"$title\" sound name \"$sound\"" &>/dev/null &
+            else
+                osascript -e "display notification \"$msg\" with title \"$title\"" &>/dev/null &
+            fi
+            ;;
+        linux|wsl)
+            if command -v notify-send &>/dev/null; then
+                local urgency=normal
+                [[ "$level" == "critical" ]] && urgency=critical
+                notify-send -u "$urgency" "$title" "$msg" &>/dev/null &
+            fi
+            ;;
+        windows)
+            # BurntToast is optional; silent no-op if module missing
+            if command -v powershell.exe &>/dev/null; then
+                powershell.exe -NoProfile -Command \
+                    "if (Get-Module -ListAvailable -Name BurntToast) { Import-Module BurntToast; New-BurntToastNotification -Text '$title','$msg' }" &>/dev/null &
+            fi
+            ;;
+    esac
+}
+
+# === CLI flags (handled before `cat` which blocks on stdin) ===
+case "${1:-}" in
+    --version|-v)
+        printf 'claude-statusline %s\n' "$STATUSLINE_VERSION"
+        exit 0
+        ;;
+    --help|-h)
+        cat <<EOF
+claude-statusline $STATUSLINE_VERSION — status line for Claude Code CLI
+
+Usage: piped from Claude Code (configured in ~/.claude/settings.json)
+       cat examples/sample-input.json | bash statusline.sh   # smoke test
+
+Flags:
+    --version, -v    Show version
+    --help, -h       Show this help
+
+Environment:
+    STATUSLINE_USAGE_LIMITS=0     Disable 5h/7d usage limits line
+    STATUSLINE_WINDOW_COUNTER=0   Disable context compaction counter
+    STATUSLINE_FLAGS=0            Disable threshold flag files
+    STATUSLINE_FLAG_DIR=<dir>     Custom flag directory
+
+Home: https://github.com/vbcherepanov/claude-statusbar
+EOF
+        exit 0
+        ;;
+esac
 
 input=$(cat)
 
@@ -136,12 +273,11 @@ if [[ "${STATUSLINE_FLAGS:-1}" != "0" ]] && (( PCT >= 70 )); then
     if (( PCT >= 95 )) && [[ ! -f "$FLAG_DIR/threshold-95" ]]; then
         printf '{"pct":%d,"in":"%s","out":"%s","cost":"%s","dur":"%s","cwd":"%s","t":"%s"}' \
             "$PCT" "$IN_FMT" "$OUT_FMT" "$COST_FMT" "$DURATION_FMT" "$CWD" "$NOW" > "$FLAG_DIR/threshold-95"
-        # macOS notification (optional, fails silently on Linux)
-        osascript -e 'display notification "Context at '"$PCT"'%! Auto-saving..." with title "Claude Code | CRITICAL" sound name "Sosumi"' &>/dev/null &
+        _notify "Claude Code | CRITICAL" "Context at ${PCT}%! Auto-saving..." critical
     elif (( PCT >= 85 )) && [[ ! -f "$FLAG_DIR/threshold-85" ]]; then
         printf '{"pct":%d,"in":"%s","out":"%s","cost":"%s","dur":"%s","cwd":"%s","t":"%s"}' \
             "$PCT" "$IN_FMT" "$OUT_FMT" "$COST_FMT" "$DURATION_FMT" "$CWD" "$NOW" > "$FLAG_DIR/threshold-85"
-        osascript -e 'display notification "Context at '"$PCT"'%! Consider saving." with title "Claude Code | WARNING" sound name "Glass"' &>/dev/null &
+        _notify "Claude Code | WARNING" "Context at ${PCT}%! Consider saving." warning
     elif (( PCT >= 70 )) && [[ ! -f "$FLAG_DIR/threshold-70" ]]; then
         printf '{"pct":%d,"t":"%s"}' "$PCT" "$NOW" > "$FLAG_DIR/threshold-70"
     fi
@@ -152,71 +288,35 @@ fi
 
 # === Usage limits (subscription quota tracking) ===
 # Fetches 5-hour and 7-day usage limits from Anthropic OAuth API.
-# Cached for 2 minutes to avoid rate limiting. Background refresh.
+# Cached for 2 minutes to avoid rate limiting.
 # Requires claude.ai OAuth login (not API key).
 # Set STATUSLINE_USAGE_LIMITS=0 to disable.
-# macOS: reads token from Keychain. Linux: reads from libsecret.
+#
+# Credential source per platform (see _get_cred): macOS Keychain → Windows Credential Manager
+# → libsecret (Linux), each with fallback to ~/.claude/.credentials.json.
 USAGE_CACHE="$HOME/.claude/.usage-cache.json"
 HAS_USAGE=0
 
 if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
     : "${NOW_EPOCH:=$(date +%s)}"
-    _cache_mtime=0
-    [[ -f "$USAGE_CACHE" ]] && {
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            _cache_mtime=$(stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0)
-        else
-            _cache_mtime=$(stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0)
-        fi
-    }
+    _cache_mtime=$(_stat_mtime "$USAGE_CACHE")
+    _cache_size=0
+    [[ -f "$USAGE_CACHE" ]] && _cache_size=$(wc -c < "$USAGE_CACHE" 2>/dev/null || echo 0)
 
-    # Force sync refresh if cache is missing or empty
-    if [[ ! -f "$USAGE_CACHE" ]] || [[ $(wc -c < "$USAGE_CACHE" 2>/dev/null || echo 0) -le 2 ]]; then
-        _tk_sync=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
-        if [[ -n "$_tk_sync" ]]; then
-            _d_sync=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
-                -H "Authorization: Bearer $_tk_sync" \
-                -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
-            [[ -n "$_d_sync" ]] && printf '%s' "$_d_sync" | jq -e '.five_hour' &>/dev/null && {
-                umask 077; printf '%s' "$_d_sync" > "$USAGE_CACHE"
-            }
-        fi
-    fi
-
-    # Refresh every 2 minutes (sync on Linux, background on macOS/Windows)
-    if (( NOW_EPOCH - _cache_mtime > 120 )); then
-        [[ -f "$USAGE_CACHE" ]] || printf '{}' > "$USAGE_CACHE"
-        _do_refresh() {
-            # Extract OAuth token from platform-specific secure storage
-            if [[ "$OSTYPE" == "darwin"* ]]; then
-                _cred=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-            elif [[ "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win"* ]]; then
-                _cred=$(powershell.exe -NoProfile -Command \
-                    '[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String((Get-StoredCredential -Target "Claude Code-credentials" -AsCredentialObject).Password))' 2>/dev/null)
-            else
-                _cred=$(secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-                # Fallback: read directly from credentials file if secret-tool fails
-                if [[ -z "$_cred" && -f "$HOME/.claude/.credentials.json" ]]; then
-                    _cred=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null)
-                fi
-            fi
-            [[ -n "$_cred" ]] || exit 1
-            _tk=$(printf '%s' "$_cred" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-            [[ -n "$_tk" ]] || exit 1
-            _d=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
-                -H "Authorization: Bearer $_tk" \
-                -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
-            [[ -n "$_d" ]] && printf '%s' "$_d" | jq -e '.five_hour' &>/dev/null && {
-                umask 077; printf '%s' "$_d" > "$USAGE_CACHE"
-            }
-        }
-        # Linux: run synchronously (Claude Code kills background processes on exit)
-        # macOS/Windows: run in background to avoid latency
-        if [[ "$OSTYPE" == "darwin"* || "$OSTYPE" == "msys"* || "$OSTYPE" == "cygwin"* || "$OSTYPE" == "win"* ]]; then
-            ( _do_refresh ) &>/dev/null &
+    # Cold start: no cache or empty — must fetch sync so user sees data on first run.
+    # Warm refresh: background on macOS/Windows (child survives parent exit),
+    #               sync on Linux/WSL (Claude Code kills child processes on exit).
+    _is_cold=0
+    [[ ! -f "$USAGE_CACHE" ]] && _is_cold=1
+    (( _cache_size <= 2 )) && _is_cold=1
+    if (( _is_cold )) || (( NOW_EPOCH - _cache_mtime > 120 )); then
+        _os=$(_detect_os)
+        if (( _is_cold )); then
+            _fetch_usage 2>/dev/null || true
+        elif [[ "$_os" == "mac" || "$_os" == "windows" ]]; then
+            ( _fetch_usage ) &>/dev/null &
         else
-            _do_refresh 2>/dev/null
-            touch "$USAGE_CACHE"
+            _fetch_usage 2>/dev/null || true
         fi
     fi
 

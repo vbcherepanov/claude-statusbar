@@ -8,6 +8,7 @@ CLAUDE_DIR="$HOME/.claude"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 TARGET="$CLAUDE_DIR/statusline.sh"
 FLAG_DIR="$CLAUDE_DIR/.context-flags"
+USAGE_CACHE="$CLAUDE_DIR/.usage-cache.json"
 
 GREEN='\033[32m' YELLOW='\033[33m' R='\033[0m'
 
@@ -39,6 +40,12 @@ fi
 if [[ -d "$FLAG_DIR" ]]; then
     rm -rf "$FLAG_DIR"
     info "Removed context flag directory"
+fi
+
+# Clean up usage cache
+if [[ -f "$USAGE_CACHE" ]]; then
+    rm -f "$USAGE_CACHE"
+    info "Removed usage cache"
 fi
 
 echo ""
