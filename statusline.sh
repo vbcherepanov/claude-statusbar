@@ -34,8 +34,8 @@ _detect_os() {
 _stat_mtime() {
     local f=$1
     [[ -f "$f" ]] || { printf '0'; return; }
-    stat -f %m "$f" 2>/dev/null \
-        || stat -c %Y "$f" 2>/dev/null \
+    stat -c %Y "$f" 2>/dev/null \
+        || stat -f %m "$f" 2>/dev/null \
         || date -r "$f" +%s 2>/dev/null \
         || printf '0'
 }
