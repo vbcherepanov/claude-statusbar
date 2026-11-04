@@ -22,9 +22,10 @@ jobs:
           bash -n statusline.sh
           bash -n install.sh
           bash -n uninstall.sh
+          bash -n tests/run.sh
 
       - name: shellcheck
-        run: shellcheck -S warning statusline.sh install.sh uninstall.sh
+        run: shellcheck -S warning statusline.sh install.sh uninstall.sh tests/run.sh
 
   smoke-unix:
     name: Smoke test (${{ matrix.os }})
@@ -62,6 +63,9 @@ jobs:
           # Expect at least 2 non-empty lines (line 3 disabled by env)
           LINES=$(printf '%s\n' "$OUTPUT" | grep -c . || true)
           test "$LINES" -ge 2
+
+      - name: Regression tests
+        run: bash tests/run.sh
 
   smoke-windows:
     name: Smoke test (windows git-bash)

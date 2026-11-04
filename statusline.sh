@@ -10,7 +10,28 @@
 #
 # Supported platforms: macOS, Linux, WSL2, Windows (Git Bash / MSYS2 / Cygwin).
 
-STATUSLINE_VERSION="1.1.0"
+STATUSLINE_VERSION="1.4.0"
+
+# === Limits: endpoints, cache files and timings ===
+USAGE_URL="https://api.anthropic.com/api/oauth/usage"
+USAGE_API_BETA="oauth-2025-04-20"
+USAGE_CACHE="$HOME/.claude/.usage-cache.json"
+USAGE_NEXT_ATTEMPT="$HOME/.claude/.usage-next-attempt"
+PLAN_CACHE="$HOME/.claude/.usage-plan"
+PROFILE_URL="https://api.anthropic.com/api/oauth/profile"
+PLAN_TTL_SECS=3600
+PLAN_EXPIRED_STAMP=200001010000
+USAGE_TTL_SECS=120
+USAGE_FAIL_BACKOFF_SECS=300
+USAGE_HTTP_TIMEOUT_SECS=5
+USAGE_STALE_SECS=900
+LIMIT_BAR_WIDTH=10
+
+# Secondary text uses an explicit 256-color gray: the faint attribute is unreadable in many themes.
+MUTED_COLOR_DEFAULT=250
+MUTED_COLOR=${STATUSLINE_MUTED_COLOR:-$MUTED_COLOR_DEFAULT}
+[[ "$MUTED_COLOR" =~ ^[0-9]+$ ]] && (( MUTED_COLOR <= 255 )) || MUTED_COLOR=$MUTED_COLOR_DEFAULT
+D="\033[38;5;${MUTED_COLOR}m"
 
 # === Platform detection and cross-platform helpers ===
 
@@ -65,21 +86,126 @@ _get_cred() {
     printf '%s' "$cred"
 }
 
-# Fetch usage JSON and write to cache on success. Silent on failure.
+# True when the epoch stored in the given file has passed (or the file is absent).
+_attempt_due() {
+    local next=0
+    [[ -f "$1" ]] && read -r next < "$1"
+    [[ "$next" =~ ^[0-9]+$ ]] || next=0
+    (( $(date +%s) >= next ))
+}
+
+# Block further attempts for N seconds. Args: state file, seconds.
+_defer_attempt() {
+    printf '%d' $(( $(date +%s) + $2 )) > "$1"
+}
+
+# Replace a file atomically from stdin, readable by the owner only.
+_write_atomic() {
+    local tmp
+    tmp=$(mktemp "$1.XXXXXX") || return 1
+    cat > "$tmp" && mv -f "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+}
+
+# Cache the subscription name, e.g. "Ultra" or "Pro"; stdin doesn't carry it. The profile's
+# plan_display_name is authoritative: the credential's type and tier can lag behind it
+# (an Ultra account can still report "max" and "..._max_20x"). Args: credential JSON, token.
+_store_plan() {
+    local cred=$1 tk=$2 plan fallback
+    [[ ! -s "$PLAN_CACHE" ]] || (( $(date +%s) - $(_stat_mtime "$PLAN_CACHE") >= PLAN_TTL_SECS )) || return 0
+
+    plan=$(printf 'header = "Authorization: Bearer %s"\n' "$tk" | curl -sf -K - \
+        --max-time "$USAGE_HTTP_TIMEOUT_SECS" -A "claude-statusline/$STATUSLINE_VERSION" \
+        -H "anthropic-beta: $USAGE_API_BETA" "$PROFILE_URL" 2>/dev/null \
+        | jq -r '.organization.plan_display_name // empty | gsub("[^A-Za-z0-9 ]"; "")' 2>/dev/null)
+    if [[ -n "$plan" ]]; then
+        printf '%s\n' "$plan" | _write_atomic "$PLAN_CACHE"
+        return
+    fi
+
+    # Profile unavailable: keep a known name, otherwise derive one and leave it expired
+    # so the next usage request asks the profile again.
+    [[ -s "$PLAN_CACHE" ]] && return 0
+    fallback=$(printf '%s' "$cred" | jq -r '.claudeAiOauth
+        | (.subscriptionType // "" | gsub("[^A-Za-z0-9]"; "")) as $type
+        | (.rateLimitTier // "" | (capture("(?<x>[0-9]+x)$").x)? // "") as $multiplier
+        | if $type == "" then empty
+          else ($type[:1] | ascii_upcase) + $type[1:] + (if $multiplier == "" then "" else " " + $multiplier end)
+          end' 2>/dev/null)
+    [[ -n "$fallback" ]] || return 0
+    printf '%s\n' "$fallback" | _write_atomic "$PLAN_CACHE" && touch -t "$PLAN_EXPIRED_STAMP" "$PLAN_CACHE"
+}
+
+# Fetch usage JSON and cache it on success. Every attempt schedules the next one,
+# so a failing endpoint is never retried on each render; a 429 honours Retry-After.
 _fetch_usage() {
-    local cred tk data
+    local cred tk body hdr code delay=$USAGE_FAIL_BACKOFF_SECS retry
+    _defer_attempt "$USAGE_NEXT_ATTEMPT" "$USAGE_FAIL_BACKOFF_SECS"
     cred=$(_get_cred)
     [[ -n "$cred" ]] || return 1
     tk=$(printf '%s' "$cred" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
     [[ -n "$tk" ]] || return 1
-    data=$(curl -sf --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
-        -H "Authorization: Bearer $tk" \
-        -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null)
-    [[ -n "$data" ]] || return 1
-    printf '%s' "$data" | jq -e '.five_hour' &>/dev/null || return 1
-    umask 077
-    printf '%s' "$data" > "$USAGE_CACHE"
-    touch "$USAGE_CACHE"
+    _store_plan "$cred" "$tk"
+
+    body=$(mktemp "${TMPDIR:-/tmp}/statusline-usage.XXXXXX") || return 1
+    hdr=$(mktemp "${TMPDIR:-/tmp}/statusline-usage.XXXXXX") || { rm -f "$body"; return 1; }
+    # The token goes through stdin so it never shows up in the process list.
+    code=$(printf 'header = "Authorization: Bearer %s"\n' "$tk" | curl -s -K - \
+        --max-time "$USAGE_HTTP_TIMEOUT_SECS" -o "$body" -D "$hdr" -w '%{http_code}' \
+        -A "claude-statusline/$STATUSLINE_VERSION" \
+        -H "anthropic-beta: $USAGE_API_BETA" "$USAGE_URL" 2>/dev/null)
+
+    # Windows are optional: some plans have no five_hour, so don't require any single one.
+    if [[ "$code" == "200" ]] \
+        && jq -e 'type == "object" and (has("limits") or has("five_hour") or has("seven_day"))' "$body" &>/dev/null \
+        && _write_atomic "$USAGE_CACHE" < "$body"; then
+        _defer_attempt "$USAGE_NEXT_ATTEMPT" "$USAGE_TTL_SECS"
+    else
+        retry=$(tr -d '\r' < "$hdr" | sed -n 's/^[Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]: *\([0-9][0-9]*\)$/\1/p' | tail -1)
+        [[ -n "$retry" ]] && delay=$retry
+        (( delay < USAGE_TTL_SECS )) && delay=$USAGE_TTL_SECS
+        _defer_attempt "$USAGE_NEXT_ATTEMPT" "$delay"
+    fi
+    rm -f "$body" "$hdr"
+}
+
+# Format seconds until a reset: 300 → "5m", 9660 → "2h41m", 158400 → "1d20h"
+_fmt_left() {
+    local s=$1 d h m
+    d=$((s / 86400)) h=$(((s % 86400) / 3600)) m=$(((s % 3600) / 60))
+    if (( d > 0 )); then printf '%dd%dh' "$d" "$h"
+    elif (( h > 0 )); then printf '%dh%02dm' "$h" "$m"
+    else printf '%dm' "$m"
+    fi
+}
+
+# Render one limit as "label [bar] left% ↻reset" into LIMIT_SEGMENT (fuel gauge: full=good).
+# Args: label, used percent, reset epoch (0 = unknown), "stale" to mark old data.
+_limit_segment() {
+    local label=$1 used=$2 reset=$3 stale=$4 rem filled color bar='' i left=''
+    rem=$((100 - used))
+    (( rem < 0 )) && rem=0
+    (( rem > 100 )) && rem=100
+    filled=$((rem * LIMIT_BAR_WIDTH / 100))
+    if (( rem > 50 )); then color='\033[32m'; elif (( rem > 20 )); then color='\033[33m'; else color='\033[31m'; fi
+    for ((i=0; i<filled; i++)); do bar+='█'; done
+    for ((i=filled; i<LIMIT_BAR_WIDTH; i++)); do bar+='░'; done
+    (( reset > NOW_EPOCH )) && left=" ${D}↻$(_fmt_left $((reset - NOW_EPOCH)))${R}"
+    LIMIT_SEGMENT="${D}${label}${R} [${color}${bar}${R}] ${color}${stale:+~}${rem}%${R}${left}"
+}
+
+# Join TSV rows (label, used, reset, source) into SEP-separated segments in LIMIT_LINE.
+# Rows from a cache older than USAGE_STALE_SECS get a "~" marker. Args: cache file.
+_build_limit_line() {
+    local cache=$1 label used reset src stale age
+    LIMIT_LINE=''
+    age=$(( NOW_EPOCH - $(_stat_mtime "$cache") ))
+    while IFS=$'\t' read -r label used reset src; do
+        [[ -n "$label" ]] || continue
+        stale=''
+        [[ "$src" == "cache" ]] && (( age > USAGE_STALE_SECS )) && stale=stale
+        _limit_segment "$label" "$used" "$reset" "$stale"
+        LIMIT_LINE+="${LIMIT_LINE:+$SEP}$LIMIT_SEGMENT"
+    done
 }
 
 # Platform-aware notification. Silent if no notifier available.
@@ -134,10 +260,13 @@ Flags:
     --help, -h       Show this help
 
 Environment:
-    STATUSLINE_USAGE_LIMITS=0     Disable 5h/7d usage limits line
+    STATUSLINE_USAGE_LIMITS=0     Disable all usage limit lines and their network calls
+    STATUSLINE_MUTED_COLOR=<n>    256-color number for secondary text (default 250)
+    STATUSLINE_PLAN=0             Hide the subscription name in the limits line
     STATUSLINE_WINDOW_COUNTER=0   Disable context compaction counter
     STATUSLINE_FLAGS=0            Disable threshold flag files
     STATUSLINE_FLAG_DIR=<dir>     Custom flag directory
+    STATUSLINE_GITHUB=0           Disable PR badge in line 2
 
 Home: https://github.com/vbcherepanov/claude-statusbar
 EOF
@@ -151,7 +280,7 @@ input=$(cat)
 # Uses @sh for safe shell escaping (compatible with macOS bash 3.2+)
 eval "$(echo "$input" | jq -r '
     "MODEL="    + (.model.display_name // "Unknown" | @sh),
-    "CWD="      + (.cwd // "" | @sh),
+    "CWD="      + (.workspace.current_dir // .cwd // "" | @sh),
     "VIM_MODE=" + (.vim.mode // "" | @sh),
     "AGENT_NAME=" + (.agent.name // "" | @sh),
     "EXCEEDS_200K=" + (.exceeds_200k_tokens // false | tostring | @sh),
@@ -165,7 +294,12 @@ eval "$(echo "$input" | jq -r '
     "DURATION_MS="  + (.cost.total_duration_ms // 0 | tostring | @sh),
     "API_DURATION_MS=" + (.cost.total_api_duration_ms // 0 | tostring | @sh),
     "LINES_ADDED="  + (.cost.total_lines_added // 0 | tostring | @sh),
-    "LINES_REMOVED=" + (.cost.total_lines_removed // 0 | tostring | @sh)
+    "LINES_REMOVED=" + (.cost.total_lines_removed // 0 | tostring | @sh),
+    "GH_REPO="      + (.workspace.repo.name // .github.repo // "" | @sh),
+    "PR_NUMBER="    + (.pr.number // .github.pr.number // 0 | tostring | @sh),
+    "PR_STATE="     + (.pr.review_state // .github.pr.state // "" | @sh),
+    "PR_DRAFT="     + (.github.pr.draft // false | tostring | @sh),
+    "PR_KIND="      + (.pr.kind // "" | @sh)
 ')"
 
 # === Formatting helpers (pure bash, no subshells) ===
@@ -224,7 +358,7 @@ fi
 
 # Git branch (only if inside a repo)
 GIT_BRANCH=""
-[[ -n "$CWD" && -d "$CWD/.git" ]] && GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
+[[ -n "$CWD" && -d "$CWD" ]] && GIT_BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null)
 
 # Working directory name
 DIR_NAME="${CWD##*/}"
@@ -259,7 +393,7 @@ if [[ "${STATUSLINE_WINDOW_COUNTER:-1}" != "0" ]]; then
         W_PEAK=$CUR_T
     fi
     printf '%d %d %d' "$WINDOW_COUNT" "$W_PEAK" "$NOW_EPOCH" > "$WINDOW_STATE"
-    WIN_FMT="\033[2m#${WINDOW_COUNT}\033[0m"
+    WIN_FMT="${D}#${WINDOW_COUNT}\033[0m"
 fi
 
 # === Optional: Context threshold flags ===
@@ -286,80 +420,98 @@ elif [[ "${STATUSLINE_FLAGS:-1}" != "0" ]] && (( PCT < 10 )); then
     [[ -d "$FLAG_DIR" ]] && rm -f "$FLAG_DIR"/threshold-* 2>/dev/null
 fi
 
+# === ANSI shortcuts ===
+R='\033[0m' SEP=" ${D}|${R} "
+
 # === Usage limits (subscription quota tracking) ===
-# Fetches 5-hour and 7-day usage limits from Anthropic OAuth API.
-# Cached for 2 minutes to avoid rate limiting.
-# Requires claude.ai OAuth login (not API key).
+# Sources, freshest first:
+#  - stdin .rate_limits: documented, no network. Each window may be absent, e.g. plans
+#    without a 5-hour limit, so an absent window means there is no such limit.
+#  - cached /api/oauth/usage: undocumented, but the only source of per-model limits such as
+#    Fable, and the fallback for 5h/7d before the session's first API response.
+# Rows are classified by the server's `kind`, never by label. Requires claude.ai OAuth login.
 # Set STATUSLINE_USAGE_LIMITS=0 to disable.
 #
 # Credential source per platform (see _get_cred): macOS Keychain → Windows Credential Manager
 # → libsecret (Linux), each with fallback to ~/.claude/.credentials.json.
-USAGE_CACHE="$HOME/.claude/.usage-cache.json"
-HAS_USAGE=0
+CLAUDE_LIMITS=''
+
+# jq helpers: label sanitizer, reset parser (epoch or ISO 8601, fraction optional)
+# and TSV row builder. Windows whose reset has passed are dropped.
+JQ_LIMIT_DEFS='
+def clean: tostring | gsub("[\\p{Cc}\\\\]"; "");
+def offset_secs:
+    if . == "Z" then 0
+    else capture("^(?<s>[+-])(?<h>[0-9]{2}):?(?<m>[0-9]{2})$")
+        | ((.h | tonumber) * 3600 + (.m | tonumber) * 60) * (if .s == "-" then -1 else 1 end)
+    end;
+def epoch:
+    if type == "number" then floor
+    elif type == "string" then
+        try (capture("^(?<d>[0-9T:-]+?)(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
+            | (.d + "Z" | fromdate) - (.z // "Z" | offset_secs))
+        catch null
+    else null end;
+def row($label; $used; $reset; $src):
+    if ($used | type) == "number"
+    then {label: ($label | clean), used: ($used | floor), reset: (($reset | epoch) // 0), src: $src}
+    else empty end;
+def emit($now): select(.reset == 0 or .reset > $now) | [.label, .used, .reset, .src] | @tsv;
+'
 
 if [[ "${STATUSLINE_USAGE_LIMITS:-1}" != "0" ]]; then
     : "${NOW_EPOCH:=$(date +%s)}"
-    _cache_mtime=$(_stat_mtime "$USAGE_CACHE")
-    _cache_size=0
-    [[ -f "$USAGE_CACHE" ]] && _cache_size=$(wc -c < "$USAGE_CACHE" 2>/dev/null || echo 0)
 
-    # Cold start: no cache or empty — must fetch sync so user sees data on first run.
-    # Warm refresh: background on macOS/Windows (child survives parent exit),
-    #               sync on Linux/WSL (Claude Code kills child processes on exit).
-    _is_cold=0
-    [[ ! -f "$USAGE_CACHE" ]] && _is_cold=1
-    (( _cache_size <= 2 )) && _is_cold=1
-    if (( _is_cold )) || (( NOW_EPOCH - _cache_mtime > 120 )); then
+    # No cache yet: fetch sync so the first render has data.
+    # Otherwise background on macOS/Windows (child survives parent exit),
+    # sync on Linux/WSL (Claude Code kills child processes on exit).
+    if _attempt_due "$USAGE_NEXT_ATTEMPT"; then
         _os=$(_detect_os)
-        if (( _is_cold )); then
+        if [[ ! -s "$USAGE_CACHE" || ( "$_os" != "mac" && "$_os" != "windows" ) ]]; then
             _fetch_usage 2>/dev/null || true
-        elif [[ "$_os" == "mac" || "$_os" == "windows" ]]; then
-            ( _fetch_usage ) &>/dev/null &
         else
-            _fetch_usage 2>/dev/null || true
+            _defer_attempt "$USAGE_NEXT_ATTEMPT" "$USAGE_TTL_SECS"
+            ( _fetch_usage ) &>/dev/null &
         fi
     fi
 
-    # Read cached data and compute remaining % and reset times
-    if [[ -f "$USAGE_CACHE" ]]; then
-        eval "$(jq -r --argjson now "$NOW_EPOCH" '
-            "U5H_USED=" + (.five_hour.utilization // 0 | floor | tostring | @sh),
-            "U7D_USED=" + (.seven_day.utilization // 0 | floor | tostring | @sh),
-            "U5H_LEFT=" + ((.five_hour.resets_at // "" | if . == "" or . == "null" then 0 else ((split(".")[0] + "Z" | fromdate) - $now | if . < 0 then 0 else . end) end) | tostring | @sh),
-            "U7D_LEFT=" + ((.seven_day.resets_at // "" | if . == "" or . == "null" then 0 else ((split(".")[0] + "Z" | fromdate) - $now | if . < 0 then 0 else . end) end) | tostring | @sh)
-        ' "$USAGE_CACHE" 2>/dev/null)"
-        : "${U5H_USED:=0}" "${U7D_USED:=0}" "${U5H_LEFT:=0}" "${U7D_LEFT:=0}"
-        U5H_REM=$(( 100 - U5H_USED )); (( U5H_REM < 0 )) && U5H_REM=0
-        U7D_REM=$(( 100 - U7D_USED )); (( U7D_REM < 0 )) && U7D_REM=0
+    _cached=$(jq -c . "$USAGE_CACHE" 2>/dev/null)
+    _build_limit_line "$USAGE_CACHE" < <(printf '%s\n%s\n' "$input" "${_cached:-null}" | jq -rs --argjson now "$NOW_EPOCH" "$JQ_LIMIT_DEFS"'
+        (.[0].rate_limits // {}) as $live | (.[1] // {}) as $c |
+        def scope_label:
+            .scope.model.display_name
+            // (.scope.surface | if type == "object" then .display_name elif type == "string" then . else null end)
+            // .kind;
+        [row("5h"; $live.five_hour.used_percentage; $live.five_hour.resets_at; "live"),
+         row("7d"; $live.seven_day.used_percentage; $live.seven_day.resets_at; "live")] as $live_rows |
+        (($c.limits // []) | map(select(type == "object"))) as $meters |
+        (if ($meters | length) > 0 then
+            [$meters[] | select(.kind == "session") | row("5h"; .percent; .resets_at; "cache")]
+            + [$meters[] | select(.kind == "weekly_all") | row("7d"; .percent; .resets_at; "cache")]
+        else
+            [row("5h"; $c.five_hour.utilization; $c.five_hour.resets_at; "cache"),
+             row("7d"; $c.seven_day.utilization; $c.seven_day.resets_at; "cache")]
+        end) as $cached_rows |
+        (if ($meters | length) > 0 then
+            [$meters[] | select(.kind != "session" and .kind != "weekly_all")
+                | row(scope_label; .percent; .resets_at; "cache")]
+        else
+            [row("Opus"; $c.seven_day_opus.utilization; $c.seven_day_opus.resets_at; "cache"),
+             row("Sonnet"; $c.seven_day_sonnet.utilization; $c.seven_day_sonnet.resets_at; "cache")]
+        end) as $model_rows |
+        (if ($live_rows | length) > 0 then $live_rows else $cached_rows end)
+        + $model_rows
+        + [row("spend"; $live.spend_limit.used_percentage; $live.spend_limit.resets_at; "live")]
+        | .[] | emit($now)
+    ' 2>/dev/null)
+    CLAUDE_LIMITS=$LIMIT_LINE
 
-        # 5h bar (10 chars, fuel gauge: full=good, empty=danger)
-        _f=$((U5H_REM * 10 / 100)); (( _f > 10 )) && _f=10; (( _f < 0 )) && _f=0; _e=$((10 - _f))
-        if (( U5H_REM > 50 )); then C5='\033[32m'; elif (( U5H_REM > 20 )); then C5='\033[33m'; else C5='\033[31m'; fi
-        B5="$C5"; for ((i=0;i<_f;i++)); do B5+='█'; done; for ((i=0;i<_e;i++)); do B5+='░'; done; B5+='\033[0m'
-
-        # 7d bar (10 chars)
-        _f=$((U7D_REM * 10 / 100)); (( _f > 10 )) && _f=10; (( _f < 0 )) && _f=0; _e=$((10 - _f))
-        if (( U7D_REM > 50 )); then C7='\033[32m'; elif (( U7D_REM > 20 )); then C7='\033[33m'; else C7='\033[31m'; fi
-        B7="$C7"; for ((i=0;i<_f;i++)); do B7+='█'; done; for ((i=0;i<_e;i++)); do B7+='░'; done; B7+='\033[0m'
-
-        # Format 5h reset time (pure bash)
-        _s=${U5H_LEFT%%.*}; : "${_s:=0}"
-        _h=$((_s/3600)) _m=$(((_s%3600)/60))
-        if (( _h > 0 )); then T5H="${_h}h$(printf '%02d' $_m)m"; else T5H="${_m}m"; fi
-
-        # Format 7d reset time (pure bash, supports days)
-        _s=${U7D_LEFT%%.*}; : "${_s:=0}"
-        _d=$((_s/86400)) _h=$(((_s%86400)/3600)) _m=$(((_s%3600)/60))
-        if (( _d > 0 )); then T7D="${_d}d${_h}h"
-        elif (( _h > 0 )); then T7D="${_h}h$(printf '%02d' $_m)m"
-        else T7D="${_m}m"; fi
-
-        HAS_USAGE=1
+    if [[ "${STATUSLINE_PLAN:-1}" != "0" && -s "$PLAN_CACHE" ]]; then
+        read -r _plan < "$PLAN_CACHE"
+        [[ -n "$_plan" ]] && CLAUDE_LIMITS="\033[36m${_plan}${R}${CLAUDE_LIMITS:+$SEP$CLAUDE_LIMITS}"
     fi
-fi
 
-# === ANSI shortcuts ===
-R='\033[0m' D='\033[2m' SEP=" ${D}|${R} "
+fi
 
 # === Line 1: Model | Context bar % of size #window | Tokens in/out | Cache ===
 if [[ -n "$WIN_FMT" ]]; then
@@ -373,20 +525,43 @@ else
 fi
 
 # === Line 2: Cost | Duration | Lines | Git | Dir | extras ===
-L2=$(printf '\033[33m%s\033[0m%b\033[34m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
+L2=$(printf '\033[33m%s\033[0m%b\033[94m⏱ %s\033[0m %b(api %s)%b%b\033[32m+%s\033[0m/\033[31m-%s\033[0m' \
     "$COST_FMT" "$SEP" "$DURATION_FMT" "$D" "$API_DUR_FMT" "$R" "$SEP" "$LINES_ADDED" "$LINES_REMOVED")
 
 [[ -n "$GIT_BRANCH" ]] && L2+=$(printf '%b\033[35m⎇ %s\033[0m' "$SEP" "$GIT_BRANCH")
 [[ -n "$DIR_NAME" ]]   && L2+=$(printf '%b%b📂 %s%b' "$SEP" "$D" "$DIR_NAME" "$R")
+
+# === PR badge (documented stdin fields .pr.* and .workspace.repo; .github.* is the older shape) ===
+# 🟢 open/pending | ✅ approved | 🔴 changes requested | 🟡 draft | 🟣 merged | ⚫ closed
+# | "· no PR" when the repo is known but the branch has no open PR. GitLab shows MR#N.
+# Set STATUSLINE_GITHUB=0 to hide the block.
+if [[ "${STATUSLINE_GITHUB:-1}" != "0" && -n "$GH_REPO" ]]; then
+    if (( ${PR_NUMBER:-0} > 0 )); then
+        [[ "$PR_DRAFT" == "true" ]] && PR_STATE=draft
+        case "$PR_STATE" in
+            draft)             PR_ICON='🟡' PR_COLOR='\033[33m' ;;
+            approved)          PR_ICON='✅' PR_COLOR='\033[32m' ;;
+            changes_requested) PR_ICON='🔴' PR_COLOR='\033[31m' ;;
+            merged)            PR_ICON='🟣' PR_COLOR='\033[35m' ;;
+            closed)            PR_ICON='⚫' PR_COLOR='\033[31m' ;;
+            open|pending|'')   PR_ICON='🟢' PR_COLOR='\033[32m' ;;
+            *)                 PR_ICON='⚪' PR_COLOR=$D ;;
+        esac
+        PR_PREFIX='PR'
+        [[ "$PR_KIND" == "mr" ]] && PR_PREFIX='MR'
+        L2+=$(printf '%b%b%s %s#%d%b' "$SEP" "$PR_COLOR" "$PR_ICON" "$PR_PREFIX" "$PR_NUMBER" "$R")
+    else
+        L2+=$(printf '%b%b· no PR%b' "$SEP" "$D" "$R")
+    fi
+fi
+
 [[ -n "$VIM_MODE" ]]   && { [[ "$VIM_MODE" == "NORMAL" ]] && L2+=$(printf '%b\033[34m[N]\033[0m' "$SEP") || L2+=$(printf '%b\033[32m[I]\033[0m' "$SEP"); }
 [[ -n "$AGENT_NAME" ]] && L2+=$(printf '%b\033[36m🤖 %s\033[0m' "$SEP" "$AGENT_NAME")
 [[ "$EXCEEDS_200K" == "true" ]] && L2+=$(printf ' \033[31m⚠ >200K\033[0m')
 
 printf '%b\n' "$L2"
 
-# === Line 3: Usage limits (5h + 7d with progress bars and reset countdown) ===
-if (( HAS_USAGE )); then
-    printf '%b5h%b [%b] %b%d%%%b %b↻%s%b%b%b7d%b [%b] %b%d%%%b %b↻%s%b\n' \
-        "$D" "$R" "$B5" "$C5" "$U5H_REM" "$R" "$D" "$T5H" "$R" \
-        "$SEP" "$D" "$R" "$B7" "$C7" "$U7D_REM" "$R" "$D" "$T7D" "$R"
-fi
+# === Line 3: Subscription name and Claude limits (only the windows this plan has, plus per-model ones like Fable) ===
+[[ -n "$CLAUDE_LIMITS" ]] && printf '%b\n' "$CLAUDE_LIMITS"
+
+exit 0

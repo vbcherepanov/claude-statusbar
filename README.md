@@ -9,9 +9,9 @@
 Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, subscription usage limits, and more.
 
 ```
-Claude Opus 4.6 | [████████░░░░░░░░░░░░] 42% of 200.0K #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
-$1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ main | 📂 my-project | [N]
-5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
+Claude Opus 4.7 | [████████░░░░░░░░░░░░] 42% of 200.0K #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
+$1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ feature/x | 📂 my-project | 🟢 PR#42 | [N]
+Max 20x | 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
 ```
 
 ---
@@ -53,17 +53,38 @@ $COST | ⏱ DURATION (api API_DUR) | +ADDED/-REMOVED | ⎇ BRANCH | 📂 DIR | [
 - **Lines added/removed** during the session
 - **Git branch** (when in a repo)
 - **Working directory name**
+- **PR badge** — `🟢 PR#N` (open) · `✅ PR#N` (approved) · `🔴 PR#N` (changes requested) · `🟡 PR#N` (draft) · `🟢 MR#N` (GitLab) · `· no PR` (repo detected, no open PR on this branch). Sourced from Claude Code's documented `pr.*` and `workspace.repo` stdin fields; the older `github.*` shape still works.
 - **Vim mode** `[N]` / `[I]` indicator (when vim mode is active)
 - **Sub-agent name** (when an agent is running)
 - **`⚠ >200K`** warning when tokens exceed 200K
 
-### Line 3 — subscription quota
+### Line 3 — Claude subscription limits
 
 ```
-5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h
+Max 20x | 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
 ```
 
-Real subscription limits pulled from `https://api.anthropic.com/api/oauth/usage` (cached 2 min). Shows **remaining** quota with a fuel-gauge colour (green > 50% → yellow > 20% → red) and countdown to reset. Only appears when you're logged in via `claude.ai` OAuth (not API key).
+Shows **remaining** quota with a fuel-gauge colour (green > 50% → yellow > 20% → red) and a countdown to reset. Only the limits your plan actually has appear: **a plan without a 5-hour window simply has no `5h` gauge.** Expect `5h` + `7d` on Pro (Fable runs on usage credits there), `5h` + `7d` + `Fable` on Max, and `7d` + `Fable` on verified Ultra accounts. The gauges follow what the server returns, so plan changes need no update here.
+
+| Gauge | Source |
+|---|---|
+| `5h`, `7d` | Claude Code's documented `rate_limits` stdin field. Before the session's first API response, the cached endpoint below. |
+| `Fable` and other per-model or per-surface limits | `https://api.anthropic.com/api/oauth/usage`, `limits[]` rows. **This endpoint is undocumented and may change**; Claude Code's stdin doesn't carry these limits. |
+| `spend` | `rate_limits.spend_limit` behind a Claude apps gateway. |
+| Subscription name (`Pro`, `Ultra`, …) | `plan_display_name` from the undocumented `/api/oauth/profile`, refreshed hourly and cached in `~/.claude/.usage-plan`. If that fails, derived from the OAuth credential. |
+
+The endpoint is cached for 2 minutes and every failure is backed off (`Retry-After` on HTTP 429, 5 minutes otherwise), so a failing endpoint is never retried on each render. A `~` before the percentage (`~59%`) means the cached value is more than 15 minutes old. Windows whose reset time has passed are hidden.
+
+The `Fable` percentage is what the server reports for that limit. On Max and Ultra, Fable can use [up to 50% of the weekly limit](https://support.claude.com/en/articles/15424964-claude-fable-5-promotional) and also draws from the regular weekly limit, so `7d` falls as you use it too.
+
+### Limits in Codex
+
+This status line covers Claude Code only. Codex CLI doesn't run custom status line scripts, but its own footer has built-in limit items. Add them to `~/.codex/config.toml`; an item appears only when your plan has that window:
+
+```toml
+[tui]
+status_line = ["model-with-reasoning", "context-used", "total-input-tokens", "total-output-tokens", "estimated-thread-cost", "git-branch", "project-name", "five-hour-limit", "weekly-limit"]
+```
 
 ---
 
@@ -71,7 +92,7 @@ Real subscription limits pulled from `https://api.anthropic.com/api/oauth/usage`
 
 | Feature | macOS | Linux | WSL2 | Windows (Git Bash) |
 |---|:-:|:-:|:-:|:-:|
-| 3-line status bar | ✅ | ✅ | ✅ | ✅ |
+| Status bar | ✅ | ✅ | ✅ | ✅ |
 | Usage limits (OAuth) | ✅ Keychain | ✅ libsecret → file | ✅ file | ✅ Cred Manager → file |
 | Desktop notifications | ✅ `osascript` | ✅ `notify-send`* | ✅ `notify-send`* | ✅ `BurntToast`* |
 | Installer | `install.sh` | `install.sh` | `install.sh` | `install.ps1` |
@@ -160,13 +181,13 @@ Claude Code pipes session JSON to stdin every ~300 ms. The script:
 
 1. **Parses all 16 fields in a single `jq` call** with `@sh` for safe eval
 2. **Formats values in pure bash** (no `bc`, no `awk`, no extra subshells)
-3. **Fetches usage limits** with a 2-minute cache (background on macOS/Windows, sync on Linux/WSL2 — because Claude Code kills backgrounded child processes on exit)
+3. **Reads usage limits** from stdin, plus a 2-minute cache of the usage endpoint with backoff (background on macOS/Windows, sync on Linux/WSL2 — because Claude Code kills backgrounded child processes on exit)
 4. **Writes threshold flags** at 70% / 85% / 95% context for hook integration
-5. **Outputs three ANSI-coloured lines**
+5. **Outputs up to three ANSI-coloured lines**
 
 Execution time: **~20 ms** on macOS (cache warm), **~100 ms** on Linux cold start.
 
-The code is a single self-contained shell script (~320 lines). No daemon. No database. No network except the cached usage-limits endpoint.
+The code is a single self-contained shell script. No daemon. No database. No network except the cached usage-limits endpoint.
 
 ---
 
@@ -176,15 +197,18 @@ All toggles are environment variables — set them in your shell profile or a wr
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STATUSLINE_USAGE_LIMITS` | `1` | Set `0` to disable 5h/7d line (no network calls) |
+| `STATUSLINE_USAGE_LIMITS` | `1` | Set `0` to disable all usage limit lines (no network calls) |
+| `STATUSLINE_MUTED_COLOR` | `250` | [256-color](https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit) number for secondary text (labels, separators, reset times). Use a darker gray such as `240` on a light background |
+| `STATUSLINE_PLAN` | `1` | Set `0` to hide the subscription name |
 | `STATUSLINE_WINDOW_COUNTER` | `1` | Set `0` to disable `#N` compaction counter |
 | `STATUSLINE_FLAGS` | `1` | Set `0` to disable threshold flag files |
 | `STATUSLINE_FLAG_DIR` | `~/.claude/.context-flags` | Custom directory for flag files |
+| `STATUSLINE_GITHUB` | `1` | Set `0` to hide the PR badge from line 2 |
 
 ### CLI flags
 
 ```
-statusline.sh --version   # prints: claude-statusline 1.1.0
+statusline.sh --version   # prints: claude-statusline 1.4.0
 statusline.sh --help      # flags, env vars, and link to repo
 ```
 
@@ -223,6 +247,12 @@ cat examples/sample-input.json | bash statusline.sh
 
 You can pipe this to the script on any platform to see a rendered status line without launching Claude Code.
 
+```bash
+bash tests/run.sh
+```
+
+Runs the regression suite offline: `curl` and the credential stores are stubbed.
+
 ---
 
 ## Uninstall
@@ -235,7 +265,7 @@ Or manually:
 
 ```bash
 rm ~/.claude/statusline.sh
-rm -rf ~/.claude/.context-flags ~/.claude/.usage-cache.json
+rm -rf ~/.claude/.context-flags ~/.claude/.usage-cache.json ~/.claude/.usage-next-attempt ~/.claude/.usage-plan
 # Remove the "statusLine" key from ~/.claude/settings.json
 ```
 

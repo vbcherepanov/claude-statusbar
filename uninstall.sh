@@ -9,6 +9,8 @@ SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 TARGET="$CLAUDE_DIR/statusline.sh"
 FLAG_DIR="$CLAUDE_DIR/.context-flags"
 USAGE_CACHE="$CLAUDE_DIR/.usage-cache.json"
+USAGE_NEXT_ATTEMPT="$CLAUDE_DIR/.usage-next-attempt"
+PLAN_CACHE="$CLAUDE_DIR/.usage-plan"
 
 GREEN='\033[32m' YELLOW='\033[33m' R='\033[0m'
 
@@ -47,6 +49,7 @@ if [[ -f "$USAGE_CACHE" ]]; then
     rm -f "$USAGE_CACHE"
     info "Removed usage cache"
 fi
+rm -f "$USAGE_NEXT_ATTEMPT" "$PLAN_CACHE"
 
 echo ""
 info "Uninstalled. Restart Claude Code to apply."

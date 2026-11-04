@@ -1,0 +1,21 @@
+#!/bin/bash
+# curl stub: logs argv, writes canned body/headers from $STUB_DIR, prints the status code.
+cat > /dev/null
+if [[ "$*" == */api/oauth/profile* ]]; then
+    printf '%s\n' "$*" >> "$STUB_DIR/profile.calls"
+    [[ -f "$STUB_DIR/profile.body" ]] || exit 22
+    cat "$STUB_DIR/profile.body"
+    exit 0
+fi
+printf '%s\n' "$*" >> "$STUB_DIR/curl.calls"
+while (( $# )); do
+    case "$1" in
+        -o) body=$2; shift ;;
+        -D) hdr=$2; shift ;;
+    esac
+    shift
+done
+cat "$STUB_DIR/curl.body" > "$body" 2>/dev/null
+code=$(cat "$STUB_DIR/curl.code" 2>/dev/null || echo 000)
+{ printf 'HTTP/2 %s\r\n' "$code"; [[ -f "$STUB_DIR/curl.retry" ]] && printf 'retry-after: %s\r\n' "$(cat "$STUB_DIR/curl.retry")"; } > "$hdr"
+printf '%s' "$code"
