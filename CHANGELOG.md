@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reset times without fractional seconds** (`2026-11-05T04:00:00+00:00`, used by the Fable limit) broke parsing of the whole limits line.
 - **PR badge** read `github.*`, which isn't in the documented stdin schema; it now reads `pr.*` and `workspace.repo`, keeping `github.*` as a fallback.
 - **Git branch** was missing in subdirectories and linked worktrees.
+- **Linux/WSL usage cache** never refreshed, because GNU `stat -f %m` prints filesystem stats and exits 0. `stat -c %Y` is now tried first (#4).
 
 ### Added
+- **Effort level** next to the model name, coloured by level (#3).
 - **Per-model gauges such as `Fable`**, from the `limits[]` rows of the undocumented usage endpoint.
 - **Documented `rate_limits` stdin field** as the first source for `5h`/`7d`, plus `spend_limit` behind a Claude apps gateway.
 - **README note** on enabling the built-in limit items in Codex CLI's own footer.

@@ -147,7 +147,7 @@ check "older .github shape" "$(has "$out" '🟣 PR#3')"
 new_env; printf '%s' "$(meters)" > "$STUB/curl.body"; printf '200' > "$STUB/curl.code"
 out=$(render "{$BASE}")
 check "profile unavailable: name from credential" "$(has "$out" 'Max 20x | 7d [')"
-check "credential name stays expired so the profile is retried" "$( (( NOW - $(stat -f %m "$TEST_HOME/.claude/.usage-plan" 2>/dev/null || stat -c %Y "$TEST_HOME/.claude/.usage-plan") > 3600 )) && echo ok || echo fresh)"
+check "credential name stays expired so the profile is retried" "$( (( NOW - $(stat -c %Y "$TEST_HOME/.claude/.usage-plan" 2>/dev/null || stat -f %m "$TEST_HOME/.claude/.usage-plan") > 3600 )) && echo ok || echo fresh)"
 check "plan file holds no token" "$(lacks "$(cat "$TEST_HOME/.claude/.usage-plan")" 'test-token')"
 
 new_env; printf '{"error":{}}' > "$STUB/curl.body"; printf '429' > "$STUB/curl.code"
@@ -200,6 +200,9 @@ new_env; printf '{"organization":{"plan_display_name":"Ul\\u001b[31mtra"}}' > "$
 printf '%s' "$(meters)" > "$STUB/curl.body"; printf '200' > "$STUB/curl.code"
 render "{$BASE}" >/dev/null
 check "plan name is sanitized" "$(lacks "$(cat "$TEST_HOME/.claude/.usage-plan")" $'\033')"
+
+out=$(render "{$BASE,\"effort\":{\"level\":\"high\"}}")
+check "effort level follows the model" "$(has "$out" 'M high |')"
 
 # --- Secondary text color
 new_env; block_refresh; cache "$(meters)"

@@ -9,10 +9,21 @@
 Displays real-time session metrics directly in your terminal — model, context usage, tokens, cost, duration, git branch, cache stats, subscription usage limits, and more.
 
 ```
-Claude Opus 4.7 | [████████░░░░░░░░░░░░] 42% of 200.0K #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
+Opus 5.5 high | [████████░░░░░░░░░░░░] 42% of 1.0M #1 | ↓156.8K ↑23.4K | cache r:89.0K w:45.0K
 $1.47 | ⏱ 5m42s (api 3m18s) | +245/-31 | ⎇ feature/x | 📂 my-project | 🟢 PR#42 | [N]
-Max 20x | 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
+Ultra | 7d [█████░░░░░] 52% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
 ```
+
+## What's new in 1.4.0
+
+- **Limits follow your plan.** Plans without a 5-hour window no longer show a `5h` gauge, and a stale or `null` response can't freeze the line.
+- **Fable gauge.** The separate weekly Fable limit gets its own bar.
+- **Subscription name.** `Pro`, `Max` or `Ultra` at the start of the limits line.
+- **Effort level** next to the model name, coloured by level.
+- **Readable secondary text.** Labels, separators and reset times are light gray; `STATUSLINE_MUTED_COLOR` changes the shade.
+- **No more HTTP 429 loops.** Failed usage requests back off and honour `Retry-After`.
+
+Full history: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -33,10 +44,11 @@ Claude Code's built-in status line shows the model name and a terse percentage. 
 ### Line 1 — model, context, tokens, cache
 
 ```
-Model | [████░░░░░░░░] PCT% of SIZE #W | ↓input ↑output | cache r:READ w:WRITE
+Model EFFORT | [████░░░░░░░░] PCT% of SIZE #W | ↓input ↑output | cache r:READ w:WRITE
 ```
 
 - **Model name** — which Claude model is active (color: cyan bold)
+- **Effort level** — `low`, `medium`, `high`, `xhigh` or `max`, when the model supports it
 - **Context usage bar** — 20-char visual progress bar with color thresholds (green < 70% → yellow < 90% → red)
 - **Compaction counter `#N`** — increments every time the context window gets compacted during a session
 - **Token counts** — input (`↓`) and output (`↑`) with `K`/`M` formatting
@@ -61,10 +73,12 @@ $COST | ⏱ DURATION (api API_DUR) | +ADDED/-REMOVED | ⎇ BRANCH | 📂 DIR | [
 ### Line 3 — Claude subscription limits
 
 ```
-Max 20x | 5h [██████░░░░] 68% ↻2h41m | 7d [████░░░░░░] 48% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
+Pro | 5h [██████░░░░] 68% ↻2h41m | 7d [█████░░░░░] 52% ↻1d20h
+Max | 5h [██████░░░░] 68% ↻2h41m | 7d [█████░░░░░] 52% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
+Ultra | 7d [█████░░░░░] 52% ↻1d20h | Fable [███████░░░] 70% ↻1d20h
 ```
 
-Shows **remaining** quota with a fuel-gauge colour (green > 50% → yellow > 20% → red) and a countdown to reset. Only the limits your plan actually has appear: **a plan without a 5-hour window simply has no `5h` gauge.** Expect `5h` + `7d` on Pro (Fable runs on usage credits there), `5h` + `7d` + `Fable` on Max, and `7d` + `Fable` on verified Ultra accounts. The gauges follow what the server returns, so plan changes need no update here.
+Shows **remaining** quota with a fuel-gauge colour (green > 50% → yellow > 20% → red) and a countdown to reset. Only the limits your plan actually has appear: **a plan without a 5-hour window simply has no `5h` gauge.** The examples show what each plan is documented to have: on Pro, Fable runs on usage credits, and verified Ultra accounts have no 5-hour limit. The gauges follow what the server returns, so plan changes need no update here.
 
 | Gauge | Source |
 |---|---|
